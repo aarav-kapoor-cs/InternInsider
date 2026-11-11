@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from app import tools
 from app.agent import build_agent, run_agent
+from app.db import connect, save_chat
 from app.skills import extract_skills
 
 RESUME = "Second-year CS student. Projects in Python and FastAPI with PostgreSQL. Comfortable with Docker and Git."
@@ -20,6 +22,14 @@ def test_extract_skills_finds_known_skills():
 def test_extract_skills_does_not_match_inside_words():
     # "java" must not be found inside "javascript", "go" not inside "google"
     assert extract_skills("JavaScript at Google") == ["javascript"]
+
+
+def test_extract_skills_ignores_everyday_english():
+    # Real postings say these all the time. None of them is a skill here.
+    text = "The rest of the team will react quickly. Go above and beyond. Express your interest. A swift reply."
+    assert extract_skills(text) == []
+    # Written as technologies, they count.
+    assert extract_skills("React and Swift apps, REST APIs, Rust") == ["react", "rest api", "rust", "swift"]
 
 
 # ------------------------------------------------------------------- tools
@@ -47,7 +57,7 @@ def test_match_resume_lists_matching_skills():
 def test_skill_gap_splits_have_and_missing():
     gap = tools.skill_gap(RESUME, job_id=5)  # Backend Engineer Intern
     assert gap["have"] == ["docker", "fastapi", "postgresql", "python"]
-    assert gap["missing"] == ["pytest", "rest", "sql"]
+    assert gap["missing"] == ["pytest", "rest api", "sql"]
     assert gap["match_percent"] == 57
 
 
@@ -61,15 +71,19 @@ def test_interview_prep_returns_skills_to_revise():
 
 def test_api_endpoints_work_without_an_llm_key():
     with TestClient(__import__("app.main").main.app) as client:
-        assert client.get("/api/health").json() == {"jobs": 24, "llm_configured": False}
+        health = client.get("/api/health").json()
+        assert health["jobs"] == 24 and health["linkedin"] == 0 and health["llm_configured"] is False
         assert client.get("/api/jobs/search", params={"q": "Swift iOS"}).json()[0]["title"] == "iOS Developer Intern"
         assert len(client.get("/api/jobs").json()) == 24
-        assert client.post("/api/skills", json={"text": RESUME}).json() == ["docker", "fastapi", "git", "postgresql", "python"]
+        skills = client.post("/api/skills", json={"text": RESUME}).json()
+        assert skills["skills"] == ["docker", "fastapi", "git", "postgresql", "python"]
+        assert skills["groups"]["Languages"] == ["python"]
         assert client.get("/api/jobs/9999").status_code == 404
         assert client.post("/api/match", json={"resume_text": RESUME}).status_code == 200
         assert client.post("/api/skill-gap", json={"resume_text": RESUME, "job_id": 5}).json()["match_percent"] == 57
         # chat needs a key: a clear 503, not a crash
         assert client.post("/api/chat", json={"message": "hi"}).status_code == 503
+        assert set(client.get("/api/history").json()) == {"resumes", "chats"}
 
 
 # ------------------------------------------------------------------- agent
@@ -117,7 +131,24 @@ def test_agent_loop_calls_tool_then_answers():
 def test_agent_answers_directly_when_no_tool_is_needed():
     agent = build_agent(ScriptedLLM([AIMessage(content="Hello! Paste your resume to start.")]))
     result = run_agent(agent, "hi")
-    assert result == {"reply": "Hello! Paste your resume to start.", "tool_calls": []}
+    assert result == {"reply": "Hello! Paste your resume to start.", "tool_calls": [],
+                      "tokens": {"prompt": 0, "completion": 0}}
+
+
+def test_agent_adds_up_tokens_and_the_chat_is_saved():
+    usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}  # noqa: E731
+    llm = ScriptedLLM([
+        AIMessage(content="", tool_calls=[{"name": "get_job", "args": {"job_id": 5}, "id": "c1"}],
+                  usage_metadata=usage(300, 20)),
+        AIMessage(content="Job 5 is a backend role.", usage_metadata=usage(450, 30)),
+    ])
+    result = run_agent(build_agent(llm), "Tell me about job 5")
+    assert result["tokens"] == {"prompt": 750, "completion": 50}  # both LLM calls counted
+
+    chat_id = save_chat("Tell me about job 5", result)
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM chats WHERE id = %s", (chat_id,)).fetchone()
+    assert row["tools_used"] == ["get_job"] and row["prompt_tokens"] == 750 and row["answer"].startswith("Job 5")
 
 
 # --------------------------------------------------------------------- MCP
@@ -128,7 +159,9 @@ def test_mcp_server_exposes_the_five_tools():
     from mcp.client.stdio import stdio_client
 
     async def scenario():
-        params = StdioServerParameters(command=sys.executable, args=["-m", "app.mcp_server"])
+        # env: the MCP client otherwise starts the server with a minimal environment,
+        # which drops DATABASE_URL, so the server would read the real database, not the test one.
+        params = StdioServerParameters(command=sys.executable, args=["-m", "app.mcp_server"], env=dict(os.environ))
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()

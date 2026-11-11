@@ -3,11 +3,15 @@ The 5 tools. Each one is a plain Python function with type hints and a
 docstring. The SAME functions are used in three places:
   - the LangGraph agent   (agent.py)      the LLM decides when to call them
   - the MCP server        (mcp_server.py) other AI apps can call them
-  - the REST API          (main.py)       the React page calls some directly
+  - the REST API          (main.py)       the React page calls them directly
 The docstrings matter: they are what the LLM reads to decide which tool to use.
 """
 from app.db import connect, embed, to_pgvector
 from app.skills import extract_skills
+
+# The columns every job listing shows. posted_at::text turns the DATE into
+# "2026-11-06" so the result can be sent as JSON to the browser and the LLM.
+LIST_COLUMNS = "id, title, company, location, category, url, logo_url, posted_at::text AS posted_at, source, skills"
 
 
 def search_jobs(query: str, limit: int = 5) -> list[dict]:
@@ -18,8 +22,8 @@ def search_jobs(query: str, limit: int = 5) -> list[dict]:
         # <=> is pgvector's cosine DISTANCE operator (0 = same direction).
         # Similarity is 1 - distance. ORDER BY distance = nearest first.
         rows = conn.execute(
-            """
-            SELECT id, title, company, location, skills,
+            f"""
+            SELECT {LIST_COLUMNS},
                    round((1 - (embedding <=> %s::vector))::numeric, 3)::float AS similarity
             FROM jobs
             ORDER BY embedding <=> %s::vector
@@ -34,7 +38,7 @@ def get_job(job_id: int) -> dict:
     """Get the full details of one job posting, including its description, by its id."""
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, title, company, location, category, url, description, skills FROM jobs WHERE id = %s",
+            f"SELECT {LIST_COLUMNS}, description FROM jobs WHERE id = %s",
             (job_id,),
         ).fetchone()
     return row or {"error": f"No job with id {job_id}"}
@@ -72,7 +76,7 @@ def interview_prep(job_id: int) -> dict:
     if "error" in job:
         return job
     return {"job_id": job_id, "title": job["title"], "company": job["company"],
-            "skills_to_revise": job["skills"], "posting": job["description"],
+            "skills_to_revise": job["skills"], "posting": job["description"][:4000],
             "question_types": ["technical question per skill", "one project deep-dive",
                                "one behavioural question", "one question to ask the interviewer"]}
 

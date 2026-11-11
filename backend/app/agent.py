@@ -28,12 +28,13 @@ from app.tools import ALL_TOOLS
 DEFAULT_MODEL = "openai:gpt-5.4-mini"
 
 SYSTEM_PROMPT = """You are InternInsider, a career copilot for students looking for internships.
-You can search real job postings, match a resume to jobs, find skill gaps, and prepare interview questions.
+You can search real job postings (most come from LinkedIn), match a resume to jobs, find skill gaps,
+and prepare interview questions.
 Rules:
 - Always use the tools to look up jobs. Never invent a job posting, company, or job id.
-- When you mention a job, include its id, title and company.
-- If a tool needs the resume and none was provided, ask the user to paste it.
-- Keep answers short and practical. Write plain text, no markdown symbols."""
+- When you mention a job, write it as "#id Title at Company".
+- If a tool needs the resume and none was provided, ask the user to upload or paste it on the Resume page.
+- Keep answers short and practical. Plain text. For lists, start each line with "- "."""
 
 
 def build_agent(llm=None):
@@ -57,7 +58,7 @@ def build_agent(llm=None):
 
 
 def run_agent(agent, message: str, resume_text: str = "", history: list[dict] | None = None) -> dict:
-    """Run one user turn. Returns the answer and which tools the agent called."""
+    """Run one user turn. Returns the answer, which tools the agent called, and the tokens used."""
     system = SYSTEM_PROMPT
     if resume_text.strip():
         system += "\n\nThe user's resume:\n" + resume_text.strip()
@@ -71,15 +72,18 @@ def run_agent(agent, message: str, resume_text: str = "", history: list[dict] | 
     # recursion_limit stops a confused LLM from looping on tools forever.
     result = agent.invoke({"messages": messages}, {"recursion_limit": 12})
 
-    new_messages = result["messages"][len(messages):]
-    tool_calls = [
-        {"name": call["name"], "args": _shorten(call["args"])}
-        for m in new_messages if isinstance(m, AIMessage)
-        for call in m.tool_calls
-    ]
-    return {"reply": result["messages"][-1].text, "tool_calls": tool_calls}
+    # The LLM's replies in this turn: one per trip round the loop.
+    llm_replies = [m for m in result["messages"][len(messages):] if isinstance(m, AIMessage)]
+    tool_calls = [{"name": call["name"], "args": _shorten(call["args"])}
+                  for m in llm_replies for call in m.tool_calls]
+    # Each LLM call reports its token usage. Add them up: that is what the question cost.
+    usage = [m.usage_metadata or {} for m in llm_replies]
+    tokens = {"prompt": sum(u.get("input_tokens", 0) for u in usage),
+              "completion": sum(u.get("output_tokens", 0) for u in usage)}
+    return {"reply": result["messages"][-1].text, "tool_calls": tool_calls, "tokens": tokens}
 
 
 def _shorten(args: dict) -> dict:
-    """Trim long arguments (like a whole resume) so the UI can show them."""
-    return {k: (v[:60] + "...") if isinstance(v, str) and len(v) > 60 else v for k, v in args.items()}
+    """The arguments as the UI shows them. The resume is replaced by its length, so
+    personal details (name, phone, email) never appear on screen."""
+    return {k: f"<resume, {len(v)} chars>" if k == "resume_text" else v for k, v in args.items()}

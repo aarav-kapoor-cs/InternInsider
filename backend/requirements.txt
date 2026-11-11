@@ -7,6 +7,13 @@ langchain==1.4.10
 langchain-openai==1.7.4
 mcp==2.3.0
 fastembed==0.9.1
+# LinkedIn postings
+httpx==0.28.1
+beautifulsoup4==4.15.0
+# resume upload: PDF text layer, page rendering, OCR (needs the tesseract program: brew install tesseract)
+python-multipart==0.0.33
+pypdfium2==5.15.2
+pytesseract==0.3.13
+pillow==13.0.0
 # test-only
 pytest==8.3.4
-httpx==0.28.1

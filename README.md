@@ -1,201 +1,91 @@
 # InternInsider
 
-A career copilot for students. Paste a resume, and it finds matching job postings, shows which skills are missing for a job, and prepares interview questions. A LangGraph agent with five tools does the work, job search runs on pgvector, and the same five tools are also exposed over MCP.
+A career copilot for students. Upload your resume (a PDF, or a photo of one) and it ranks real internship postings from LinkedIn by fit, shows which skills you have and which are missing for each posting, and answers questions through a LangGraph agent with five tools. The same tools are also served over MCP.
 
-Stack: React + TypeScript (Vite), Python FastAPI, PostgreSQL with pgvector, LangGraph, MCP.
+Stack: React + TypeScript, FastAPI, PostgreSQL with pgvector, LangGraph, MCP, Tesseract OCR.
 
-For interview prep, read [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) after this file.
+![Jobs page: resume matches ranked by pgvector, with the skill gap for the selected posting](docs/screenshots/jobs.png)
 
-## Architecture
+## What it does
+
+- **Jobs.** 84 internship postings from LinkedIn (Canada, November 2026). Search in your own words: "making apps for phones" finds mobile postings that never say "phones". "Match my resume" ranks postings against your whole resume, and each one shows the share of its skills that you have.
+- **Resume.** Upload a PDF, PNG or JPG. A normal PDF has a text layer and is read directly. A scanned PDF or photo has no text, only pixels, so it is read with Tesseract OCR. The skills found are shown in groups.
+- **Copilot.** Ask a question and a LangGraph agent picks which tools to call. Each answer shows the tools it used and how many tokens it cost.
+- **Saved in PostgreSQL.** Every upload (file, read method, OCR confidence, text, skills) and every copilot answer (tools used, token counts) is stored. See them at http://localhost:8001/api/history.
+
+| Resume read by OCR | Copilot with its tool calls |
+|---|---|
+| ![Resume page after OCR](docs/screenshots/resume-ocr.png) | ![Copilot answer with the tool trace open](docs/screenshots/copilot.png) |
+
+## Results
+
+- **Retrieval:** on the 84 postings and 24 test queries, pgvector raises Recall@5 from 0.211 (keyword search) to 0.284, a 35% relative gain. Run `python eval_retrieval.py` in `backend/`.
+- **OCR:** on the scanned demo resume, Tesseract reads the text with 94.7% mean confidence and finds all 17 skills in about 1 second.
+- **Tests:** 20 pass, with no API key and no network: `cd backend && python -m pytest -v`.
+
+## How it works
 
 ```
- React page                     FastAPI                        PostgreSQL + pgvector
- ──────────                     ───────                        ─────────────────────
- search / match / gap  ─HTTP─▶  REST endpoints ─────────────▶  jobs table
-                                      │                         (text + 384-number vector)
- chat message          ─HTTP─▶  /api/chat                            ▲
-                                      │                              │ SQL
-                                LangGraph agent                      │
-                                 agent ⇄ tools  ── calls ──▶  tools.py (5 functions)
-                                   │                                 ▲
-                                   ▼                                 │
-                                 OpenAI LLM              MCP server (same 5 functions,
-                                                         for other AI apps)
+LinkedIn job pages --> parse HTML --> find skills --> embed (384 numbers) --> PostgreSQL + pgvector
+                                                                                    ^
+Resume PDF/photo --> text layer, or OCR if it's a scan --> find skills              |
+                                                                                    |
+React app --> FastAPI --> 5 tools (plain Python + SQL) -----------------------------+
+                  |          ^
+                  +--> LangGraph agent (LLM picks the tools)
+                             ^
+                  MCP server (same 5 tools, for other AI apps)
 ```
 
-The five tools in `tools.py` are plain Python functions. They are used from three places: the agent, the MCP server, and the REST endpoints. The left half of the page (search, match, skill gap) calls them directly and needs no API key. Only the chat needs the LLM.
+## Run it (Mac with Homebrew PostgreSQL)
+
+```bash
+cd ~/InternInsdier
+bash start-backend.sh     # terminal 1: Postgres, pgvector, Tesseract, packages, API on :8001
+bash start-frontend.sh    # terminal 2: the React app on :5174
+```
+
+Open http://localhost:5174. For the copilot, put `OPENAI_API_KEY=sk-...` in `backend/.env` and restart the backend.
+
+To fetch fresh postings from LinkedIn (about 5 minutes), then re-measure:
+
+```bash
+cd backend && source .venv/bin/activate
+python -m app.ingest --linkedin            # fetch and save to data/linkedin_jobs.json
+python -m app.ingest --linkedin --cached   # reload the saved file, no network
+python eval_retrieval.py
+```
+
+API docs are at http://localhost:8001/docs while the backend runs.
+
+## Demo (4 minutes)
+
+1. Jobs: click "making apps for phones". Mobile postings come up without the word "phones".
+2. Resume: drop in a real PDF resume. It says "Read from the PDF's text layer" and lists the skills.
+3. Click "Try a scanned sample". It says "Read with OCR (Tesseract)" with about 95% confidence.
+4. Jobs: click "Match my resume". Each posting shows a match %, and the panel shows "You have" and "To learn".
+5. Copilot: ask "What am I missing for my best match, and what should I learn first?". The labels above the answer show which tools ran and the token count.
+6. Open http://localhost:8001/api/history: the upload and the answer are saved in PostgreSQL.
 
 ## Files
 
 ```
-backend/
-  app/db.py          connection, table schema, embed() (text -> vector)
-  app/skills.py      skill vocabulary and extract_skills()
-  app/tools.py       the 5 tools
-  app/agent.py       the LangGraph graph (agent node, tools node, loop)
-  app/mcp_server.py  the same tools over MCP
-  app/main.py        FastAPI endpoints
-  app/ingest.py      loads job postings into the database
-  data/sample_jobs.json   24 invented postings for an offline demo
-  eval_retrieval.py  Recall@5: keyword search vs pgvector
-  tests/test_app.py  11 tests
-frontend/
-  src/api.ts         fetch calls and types
-  src/App.tsx        the three pages: Jobs, AI copilot, My resume
-  src/styles.css     all the styling
-start-backend.sh, start-frontend.sh
+backend/app/
+  linkedin.py        fetch and parse LinkedIn's public job pages
+  resume_parser.py   PDF/image to text: text layer first, OCR if there is none
+  skills.py          the 114 skills and extract_skills()
+  db.py              tables (jobs, resumes, chats), embeddings, saving results
+  ingest.py          loading postings
+  tools.py           the 5 tools
+  agent.py           the LangGraph agent
+  mcp_server.py      the same tools over MCP
+  main.py            FastAPI endpoints
+backend/eval_retrieval.py   Recall@5: keyword vs pgvector
+frontend/src/pages/         JobsPage, ResumePage, CopilotPage
 ```
 
-## Setup (Mac with Homebrew PostgreSQL)
+## About the LinkedIn data
 
-Terminal 1:
+LinkedIn has no jobs API for individuals, so `linkedin.py` reads the public job pages that anyone can see without logging in, waiting 1 to 2 seconds between requests. LinkedIn's terms do not allow scraping, so keep it to a small personal demo. The saved postings (`backend/data/linkedin_jobs.json`) are not committed. French-language postings are skipped (the embedding model is English-only), and a job listed in several cities is kept once.
 
-```bash
-cd ~/InternInsdier
-bash start-backend.sh
-```
-
-The script starts PostgreSQL, creates the database, installs pgvector if it is missing, installs the Python packages, loads the sample postings, and runs the API on http://localhost:8001. The first run downloads a small embedding model. Wait for `Application startup complete.`
-
-Terminal 2:
-
-```bash
-cd ~/InternInsdier
-bash start-frontend.sh
-```
-
-Open http://localhost:5174.
-
-### Add your OpenAI key (for the chat)
-
-Open `backend/.env` (the start script creates it) and put your key after the `=`:
-
-```
-OPENAI_API_KEY=sk-...
-```
-
-Save, then stop the backend with Ctrl+C and run `bash start-backend.sh` again. The page header should say "AI chat ready". The default model is `gpt-5.4-mini`. To use another, add a line such as `LLM_MODEL=openai:gpt-4o-mini` to `.env`.
-
-Never commit `.env`. It is in `.gitignore`.
-
-### Tests
-
-```bash
-cd ~/InternInsdier/backend
-source .venv/bin/activate
-python -m pytest -v
-```
-
-The tests need no API key and no model download. They use a separate database, a simple stand-in embedder, and a scripted stand-in for the LLM.
-
-### Real job postings
-
-```bash
-python -m app.ingest --remotive
-```
-
-This replaces the sample postings with about 100 real remote software jobs from the public Remotive API.
-
-### Retrieval evaluation
-
-```bash
-python eval_retrieval.py
-```
-
-Prints Recall@5 for keyword search and for pgvector search on 12 queries, and reloads the sample postings first.
-
-### Use the tools from another AI app (MCP)
-
-`python -m app.mcp_server` runs the MCP server over stdio. To add it to Claude Desktop, put this in its `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "interninsider": {
-      "command": "/Users/aaravkapoor/InternInsdier/backend/.venv/bin/python",
-      "args": ["-m", "app.mcp_server"],
-      "cwd": "/Users/aaravkapoor/InternInsdier/backend"
-    }
-  }
-}
-```
-
-## Demo script (3 minutes)
-
-1. Search "making apps for phones". The mobile jobs come up although none of them contains the word "phones". That is embedding search.
-2. Paste a resume and click "Find jobs that match my resume".
-3. Click "Skill gap" on a result. Have, missing, and a match percentage.
-4. In the chat, ask "What am I missing for job 5?" and then "Give me interview questions for it". The grey line above each answer shows which tool the agent chose.
-5. Run `python -m pytest -v`.
-
-## API
-
-| Method | Path | Body | What it does | Needs LLM |
-|---|---|---|---|---|
-| GET | `/api/health` | | Number of postings loaded, whether a key is set | no |
-| GET | `/api/jobs` | | All postings (up to 60) | no |
-| GET | `/api/jobs/search?q=...&limit=5` | | Embedding search over postings | no |
-| POST | `/api/skills` | `{text}` | Skills found in a piece of text | no |
-| GET | `/api/jobs/{id}` | | One posting in full (404 if unknown) | no |
-| POST | `/api/match` | `{resume_text}` | Top postings for a resume, with matching skills | no |
-| POST | `/api/skill-gap` | `{resume_text, job_id}` | Skills you have, skills missing, match percent | no |
-| POST | `/api/chat` | `{message, resume_text?, history?}` | Runs the agent. Returns `{reply, tool_calls}`. 503 if no key, 502 if the LLM call fails | yes |
-
-The agent's five tools: `search_jobs`, `get_job`, `match_resume`, `skill_gap`, `interview_prep`.
-
-## Database schema
-
-One table, `jobs`.
-
-| Column | Type | Why it is there |
-|---|---|---|
-| `id` | SERIAL PRIMARY KEY | The job id the agent and the UI refer to |
-| `title`, `company`, `location`, `category`, `url` | TEXT | Shown to the user |
-| `description` | TEXT | The posting text |
-| `skills` | TEXT[] | Skills found in the title and description at load time, so skill gap is a set comparison |
-| `embedding` | vector(384) | The title and description turned into 384 numbers by the embedding model. Search compares these. |
-
-There is an HNSW index on `embedding` with `vector_cosine_ops`. Search is one query:
-
-```sql
-SELECT ..., 1 - (embedding <=> $query_vector) AS similarity
-FROM jobs ORDER BY embedding <=> $query_vector LIMIT 5;
-```
-
-`<=>` is cosine distance. Smaller distance means closer meaning.
-
-## Demo-only shortcuts
-
-- No login. The resume is plain pasted text and is not stored.
-- CORS allows every origin.
-- The sample postings are invented. Use `--remotive` for real ones.
-- Skill extraction is a fixed word list, so it misses skills that are not on the list.
-- The chat is not streamed. The answer appears when the agent has finished.
-- Conversation history is kept in the browser and sent with each message. Nothing is saved on the server.
-
-## Test results
-
-Run on PostgreSQL 16 with pgvector 0.6, Python 3.13, 10 November 2026: 11 passed, 0 failed.
-
-| Test | Result |
-|---|---|
-| test_extract_skills_finds_known_skills | passed |
-| test_extract_skills_does_not_match_inside_words | passed |
-| test_search_returns_closest_job_first | passed |
-| test_get_job_and_unknown_job | passed |
-| test_match_resume_lists_matching_skills | passed |
-| test_skill_gap_splits_have_and_missing | passed |
-| test_interview_prep_returns_skills_to_revise | passed |
-| test_api_endpoints_work_without_an_llm_key | passed |
-| test_agent_loop_calls_tool_then_answers | passed |
-| test_agent_answers_directly_when_no_tool_is_needed | passed |
-| test_mcp_server_exposes_the_five_tools | passed |
-
-Also checked by hand in a real browser (Chromium): search, resume match, skill gap, and a chat turn that showed the tool call and the answer.
-
-What was not verified when this was built:
-
-- A real LLM. No API key was available, so the chat and the agent loop were only run with a scripted stand-in for the LLM. The first real test is yours, with your key.
-- The real embedding model. The build machine could not download it, so tests and the browser check used the stand-in embedder, which matches shared words only. "Search by meaning" has not been seen working yet.
-- `eval_retrieval.py` with the real model. It runs, but there is no real Recall@5 number yet.
-- `--remotive`, the start scripts, the pgvector install step, and anything on macOS.
+Demo shortcuts: no login, and uploaded resumes are stored in the local database with no way to delete them from the app. A real version would need accounts, consent and deletion.

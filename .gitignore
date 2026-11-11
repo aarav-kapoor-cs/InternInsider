@@ -6,3 +6,11 @@ __pycache__/
 .env
 *.log
 .DS_Store
+# LinkedIn postings belong to LinkedIn and the companies: keep the snapshot local
+backend/data/linkedin_jobs.json
+# old copies of the first version, kept locally
+InternInsider_main_code.txt
+interninsider-mvp.zip
+# personal interview notes, not for the public repo
+INTERVIEW_CHEATSHEET.md
+INTERVIEW_CHEATSHEET.pdf

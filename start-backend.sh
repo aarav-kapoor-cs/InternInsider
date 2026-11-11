@@ -37,21 +37,30 @@ if ! SQL interninsider "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1; 
   fi
 fi
 
-# 4. Python virtual environment + packages.
+# 4. Tesseract, the OCR engine used for scanned resumes.
+command -v tesseract >/dev/null || { echo "Installing Tesseract OCR (one time)..."; brew install tesseract; }
+
+# 5. Python virtual environment + packages.
 [ -d .venv ] || python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -q -r requirements.txt || { echo "ERROR: pip install failed"; exit 1; }
 
-# 5. Settings file for your API key.
+# 6. Settings file for your API key.
 [ -f .env ] || cp .env.example .env
 
-# 6. Load the job postings the first time (downloads the embedding model once).
+# 7. Load the job postings the first time (downloads the embedding model once).
+#    Uses the saved LinkedIn snapshot if there is one, otherwise the invented sample postings.
 COUNT=$(SQL interninsider "SELECT count(*) FROM jobs" 2>/dev/null)
 if [ -z "$COUNT" ] || [ "$COUNT" = "0" ]; then
   echo "Loading job postings (first run downloads a small embedding model)..."
-  python -m app.ingest || { echo "ERROR: loading jobs failed"; exit 1; }
+  if [ -f data/linkedin_jobs.json ]; then
+    python -m app.ingest --linkedin --cached || { echo "ERROR: loading jobs failed"; exit 1; }
+  else
+    python -m app.ingest || { echo "ERROR: loading jobs failed"; exit 1; }
+    echo "Loaded SAMPLE postings. For real ones run: cd backend && python -m app.ingest --linkedin"
+  fi
 fi
 
-# 7. Run the server.
+# 8. Run the server.
 echo "Backend starting on http://localhost:8001  (Ctrl+C to stop)"
 exec python -m uvicorn app.main:app --reload --port 8001
