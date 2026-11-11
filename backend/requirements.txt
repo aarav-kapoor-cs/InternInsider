@@ -1,0 +1,12 @@
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+psycopg[binary]==3.3.8
+python-dotenv==1.2.3
+langgraph==1.2.20
+langchain==1.4.10
+langchain-openai==1.7.4
+mcp==2.3.0
+fastembed==0.9.1
+# test-only
+pytest==8.3.4
+httpx==0.28.1
